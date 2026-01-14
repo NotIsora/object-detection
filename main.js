@@ -1,5 +1,7 @@
 // main.js
-const worker = new Worker('worker.js', { type: 'module' });
+
+// FIX: Sử dụng new URL để resolve đường dẫn tương đối chính xác trên GitHub Pages
+const worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
 
 const video = document.getElementById('webcam');
 const canvas = document.getElementById('output-canvas');
@@ -7,27 +9,41 @@ const ctx = canvas.getContext('2d');
 const btnStart = document.getElementById('btn-start');
 const statusDiv = document.getElementById('status');
 
-let isProcessing = false; // "Van" khóa để ngăn spam worker
-let lastPredictions = []; // Lưu kết quả cũ để vẽ liên tục trong khi chờ kết quả mới
+let isProcessing = false; 
+let lastPredictions = []; 
 
 // 1. Khởi động Webcam
 btnStart.addEventListener('click', async () => {
+    btnStart.disabled = true;
+    statusDiv.innerText = "Requesting camera access...";
+    
     try {
+        // Ràng buộc facingMode environment cho điện thoại
         const stream = await navigator.mediaDevices.getUserMedia({
-            video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: "environment" }
+            video: { 
+                width: { ideal: 640 }, 
+                height: { ideal: 480 }, 
+                facingMode: "environment" 
+            }
         });
         video.srcObject = stream;
         video.play();
         
         video.onloadeddata = () => {
+            // Set kích thước canvas khớp với kích thước thực tế của video stream
             canvas.width = video.videoWidth;
             canvas.height = video.videoHeight;
-            requestAnimationFrame(loop); // Bắt đầu vòng lặp
-            statusDiv.innerText = "Webcam active. Starting inference...";
+            
+            requestAnimationFrame(loop); 
+            statusDiv.innerText = "Webcam active. Loading Model (approx 40MB)...";
             btnStart.style.display = 'none';
         };
     } catch (err) {
-        alert("Error accessing webcam: " + err);
+        console.error(err);
+        statusDiv.innerText = "Error: " + err.message;
+        statusDiv.style.color = "red";
+        btnStart.disabled = false;
+        alert("Không thể truy cập Camera. Hãy đảm bảo bạn đang chạy trên HTTPS hoặc Localhost.");
     }
 });
 
@@ -36,86 +52,78 @@ worker.onmessage = (e) => {
     const { status, output, data } = e.data;
 
     if (status === 'complete') {
-        lastPredictions = output; // Cập nhật vị trí mới
-        isProcessing = false;     // Mở khóa để gửi frame tiếp theo
-    } // main.js (tìm đoạn xử lý status === 'loading')
-
-} else if (status === 'loading') {
-    if (data.status === 'progress') {
-        // [FIX] Kiểm tra xem có tính được % hay không
-        const percent = data.progress ? Math.round(data.progress) : null;
-        
-        if (percent !== null && !isNaN(percent)) {
-            statusDiv.innerText = `Loading Model: ${percent}%`;
-        } else {
-            // Nếu không biết tổng dung lượng, chỉ hiện đang tải
-            statusDiv.innerText = `Downloading Model... (Size unknown)`;
+        lastPredictions = output; 
+        isProcessing = false; // Mở khóa mutex
+    } else if (status === 'loading') {
+        if (data.status === 'progress') {
+            statusDiv.innerText = `Downloading Model: ${Math.round(data.progress)}%`;
+        } else if (data.status === 'done') {
+             statusDiv.innerText = `Model Loaded. Inference Running.`;
         }
-    } else {
-        statusDiv.innerText = `Status: ${data.status}`;
+    } else if (status === 'error') {
+        statusDiv.innerText = "Worker Error: " + data;
+        isProcessing = false;
     }
-}
 };
 
-// 3. Vòng lặp chính (Main Loop - 60FPS)
+// 3. Main Loop (60FPS Render, Async Inference)
 async function loop() {
-    // A. Vẽ video frame hiện tại lên canvas
+    // A. Render Frame
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-    // B. Vẽ các bounding box (dùng kết quả gần nhất)
+    // B. Render Bounding Boxes
     renderBoxes(lastPredictions);
 
-    // C. Gửi frame xuống worker (Logic bất đồng bộ tối ưu)
+    // C. Non-blocking Inference Request
     if (!isProcessing) {
-        isProcessing = true; // Khóa lại
+        isProcessing = true; 
         
-        // TẠO IMAGEBITMAP: Nhanh hơn rất nhiều so với toDataURL hay getImageData
-        const bitmap = await createImageBitmap(video);
-        
-        // Gửi bitmap xuống worker và dùng Transferable Objects (tham số thứ 2)
-        // Điều này chuyển quyền sở hữu bộ nhớ sang worker, main thread không tốn copy cost.
-        worker.postMessage({ image: bitmap, status: 'predict' }, [bitmap]);
+        try {
+            // Tối ưu hóa: createImageBitmap là bất đồng bộ và nhanh hơn toDataURL
+            const bitmap = await createImageBitmap(video);
+            
+            // Transferable Object: Chuyển quyền sở hữu bitmap sang worker (Zero-copy)
+            worker.postMessage({ image: bitmap, status: 'predict' }, [bitmap]);
+        } catch (err) {
+            console.error("Frame capture error:", err);
+            isProcessing = false;
+        }
     }
 
-    // Lặp lại
     requestAnimationFrame(loop);
 }
 
-// Hàm vẽ (Giữ nguyên logic vẽ, tối ưu hiển thị)
 function renderBoxes(boxes) {
-    ctx.font = '18px Arial';
+    ctx.font = 'bold 18px Consolas, monospace';
     ctx.lineWidth = 3;
 
     boxes.forEach(({ score, label, box }) => {
         const { xmax, xmin, ymax, ymin } = box;
-        
-        // Chọn màu cố định theo Label để đỡ bị nhấp nháy màu
         const color = getColorHash(label);
         
+        // Box
         ctx.strokeStyle = color;
-        ctx.fillStyle = color;
-
         ctx.beginPath();
         ctx.rect(xmin, ymin, xmax - xmin, ymax - ymin);
         ctx.stroke();
 
-        // Vẽ nền chữ
-        const text = `${label} ${Math.round(score * 100)}%`;
-        const textWidth = ctx.measureText(text).width;
-        ctx.fillStyle = color;
-        ctx.fillRect(xmin, ymin - 25, textWidth + 10, 25);
+        // Label Background
+        const text = `${label} ${(score * 100).toFixed(1)}%`;
+        const textMetrics = ctx.measureText(text);
+        const textHeight = 18; // approx
         
-        // Vẽ chữ
-        ctx.fillStyle = '#ffffff';
-        ctx.fillText(text, xmin + 5, ymin - 7);
+        ctx.fillStyle = color;
+        ctx.fillRect(xmin, ymin - textHeight - 8, textMetrics.width + 10, textHeight + 8);
+        
+        // Label Text
+        ctx.fillStyle = '#000000'; // Black text on colored bg for contrast
+        ctx.fillText(text, xmin + 5, ymin - 6);
     });
 }
 
-// Hàm hash màu đơn giản để giữ màu ổn định cho cùng 1 label
 function getColorHash(str) {
     let hash = 0;
     for (let i = 0; i < str.length; i++) hash = str.charCodeAt(i) + ((hash << 5) - hash);
-    const c = (hash & 0x00FFFFFF).toString(16).toUpperCase();
-    return '#' + '00000'.substring(0, 6 - c.length) + c;
-
+    const hue = Math.abs(hash % 360);
+    return `hsl(${hue}, 100%, 50%)`; // Sử dụng HSL để màu luôn tươi sáng
 }
