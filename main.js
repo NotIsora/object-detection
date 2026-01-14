@@ -1,24 +1,61 @@
-// main.js
+// main.js - DEBUG VERSION
 
-// FIX: Sử dụng new URL để resolve đường dẫn tương đối chính xác trên GitHub Pages
-const worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
+// Hàm tiện ích để log lỗi ra màn hình HTML
+function logUI(msg, isError = false) {
+    const statusDiv = document.getElementById('status');
+    const time = new Date().toLocaleTimeString();
+    statusDiv.innerHTML += `<div style="margin-top:5px; color: ${isError ? 'red' : '#00ff88'}">[${time}] ${msg}</div>`;
+    console.log(`[${time}] ${msg}`);
+}
+
+logUI("Main script loaded. Initializing Worker...");
+
+let worker;
+try {
+    // 1. Tạo Worker với đường dẫn tuyệt đối dựa trên import.meta.url
+    worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
+    logUI("Worker initialized successfully.");
+} catch (e) {
+    logUI("FATAL ERROR: Could not create Worker. " + e.message, true);
+}
 
 const video = document.getElementById('webcam');
 const canvas = document.getElementById('output-canvas');
 const ctx = canvas.getContext('2d');
 const btnStart = document.getElementById('btn-start');
-const statusDiv = document.getElementById('status');
 
 let isProcessing = false; 
 let lastPredictions = []; 
 
-// 1. Khởi động Webcam
+// Bắt lỗi từ Worker (QUAN TRỌNG)
+worker.onerror = (err) => {
+    logUI(`WORKER ERROR: ${err.message} (File: ${err.filename}, Line: ${err.lineno})`, true);
+    isProcessing = false;
+};
+
+worker.onmessage = (e) => {
+    const { status, output, data } = e.data;
+    if (status === 'complete') {
+        lastPredictions = output; 
+        isProcessing = false; 
+    } else if (status === 'loading') {
+        if (data.status === 'progress') {
+            // Chỉ cập nhật dòng cuối để đỡ spam
+            document.getElementById('status').lastElementChild.innerText = `[System] Downloading AI Model: ${Math.round(data.progress)}%`;
+        } else if (data.status === 'done') {
+            logUI("Model Loaded. AI is ready!");
+        }
+    } else if (status === 'error') {
+        logUI("AI Inference Error: " + data, true);
+        isProcessing = false;
+    }
+};
+
 btnStart.addEventListener('click', async () => {
+    logUI("Requesting Camera access...");
     btnStart.disabled = true;
-    statusDiv.innerText = "Requesting camera access...";
     
     try {
-        // Ràng buộc facingMode environment cho điện thoại
         const stream = await navigator.mediaDevices.getUserMedia({
             video: { 
                 width: { ideal: 640 }, 
@@ -26,104 +63,56 @@ btnStart.addEventListener('click', async () => {
                 facingMode: "environment" 
             }
         });
+        logUI("Camera access granted.");
         video.srcObject = stream;
         video.play();
         
         video.onloadeddata = () => {
-            // Set kích thước canvas khớp với kích thước thực tế của video stream
             canvas.width = video.videoWidth;
             canvas.height = video.videoHeight;
-            
             requestAnimationFrame(loop); 
-            statusDiv.innerText = "Webcam active. Loading Model (approx 40MB)...";
+            logUI("Video stream started. Sending first frame...");
             btnStart.style.display = 'none';
         };
     } catch (err) {
-        console.error(err);
-        statusDiv.innerText = "Error: " + err.message;
-        statusDiv.style.color = "red";
+        logUI("CAMERA ERROR: " + err.message + ". Check HTTPS/Permissions.", true);
         btnStart.disabled = false;
-        alert("Không thể truy cập Camera. Hãy đảm bảo bạn đang chạy trên HTTPS hoặc Localhost.");
     }
 });
 
-// 2. Xử lý message từ Worker
-worker.onmessage = (e) => {
-    const { status, output, data } = e.data;
-
-    if (status === 'complete') {
-        lastPredictions = output; 
-        isProcessing = false; // Mở khóa mutex
-    } else if (status === 'loading') {
-        if (data.status === 'progress') {
-            statusDiv.innerText = `Downloading Model: ${Math.round(data.progress)}%`;
-        } else if (data.status === 'done') {
-             statusDiv.innerText = `Model Loaded. Inference Running.`;
-        }
-    } else if (status === 'error') {
-        statusDiv.innerText = "Worker Error: " + data;
-        isProcessing = false;
-    }
-};
-
-// 3. Main Loop (60FPS Render, Async Inference)
 async function loop() {
-    // A. Render Frame
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-    // B. Render Bounding Boxes
     renderBoxes(lastPredictions);
 
-    // C. Non-blocking Inference Request
     if (!isProcessing) {
         isProcessing = true; 
-        
         try {
-            // Tối ưu hóa: createImageBitmap là bất đồng bộ và nhanh hơn toDataURL
             const bitmap = await createImageBitmap(video);
-            
-            // Transferable Object: Chuyển quyền sở hữu bitmap sang worker (Zero-copy)
             worker.postMessage({ image: bitmap, status: 'predict' }, [bitmap]);
         } catch (err) {
-            console.error("Frame capture error:", err);
+            // Lỗi này thường do video chưa sẵn sàng hoặc tab bị ẩn
+            console.error(err); 
             isProcessing = false;
         }
     }
-
     requestAnimationFrame(loop);
 }
 
 function renderBoxes(boxes) {
     ctx.font = 'bold 18px Consolas, monospace';
     ctx.lineWidth = 3;
-
     boxes.forEach(({ score, label, box }) => {
         const { xmax, xmin, ymax, ymin } = box;
-        const color = getColorHash(label);
-        
-        // Box
+        const color = 'red';
         ctx.strokeStyle = color;
         ctx.beginPath();
         ctx.rect(xmin, ymin, xmax - xmin, ymax - ymin);
         ctx.stroke();
-
-        // Label Background
-        const text = `${label} ${(score * 100).toFixed(1)}%`;
-        const textMetrics = ctx.measureText(text);
-        const textHeight = 18; // approx
         
         ctx.fillStyle = color;
-        ctx.fillRect(xmin, ymin - textHeight - 8, textMetrics.width + 10, textHeight + 8);
-        
-        // Label Text
-        ctx.fillStyle = '#000000'; // Black text on colored bg for contrast
-        ctx.fillText(text, xmin + 5, ymin - 6);
+        const text = `${label} ${(score * 100).toFixed(0)}%`;
+        ctx.fillRect(xmin, ymin - 20, ctx.measureText(text).width + 10, 20);
+        ctx.fillStyle = '#fff';
+        ctx.fillText(text, xmin + 5, ymin - 5);
     });
-}
-
-function getColorHash(str) {
-    let hash = 0;
-    for (let i = 0; i < str.length; i++) hash = str.charCodeAt(i) + ((hash << 5) - hash);
-    const hue = Math.abs(hash % 360);
-    return `hsl(${hue}, 100%, 50%)`; // Sử dụng HSL để màu luôn tươi sáng
 }
