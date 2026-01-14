@@ -44,6 +44,22 @@ self.addEventListener('message', async (event) => {
             self.postMessage({ status: 'error', data: e.toString() });
         }
     }
+    } else if (status === 'loading') {
+    if (data.status === 'progress') {
+        // [FIX] Kiểm tra xem có tính được % hay không
+        const percent = data.progress ? Math.round(data.progress) : null;
+        
+        if (percent !== null && !isNaN(percent)) {
+            statusDiv.innerText = `Loading Model: ${percent}%`;
+        } else {
+            // Nếu không biết tổng dung lượng, chỉ hiện đang tải
+            statusDiv.innerText = `Downloading Model... (Size unknown)`;
+        }
+    } else {
+        statusDiv.innerText = `Status: ${data.status}`;
+    }
+}
 
 });
+
 
