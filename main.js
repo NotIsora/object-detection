@@ -38,9 +38,23 @@ worker.onmessage = (e) => {
     if (status === 'complete') {
         lastPredictions = output; // Cập nhật vị trí mới
         isProcessing = false;     // Mở khóa để gửi frame tiếp theo
-    } else if (status === 'loading') {
-        if (data.status === 'progress') statusDiv.innerText = `Loading AI: ${Math.round(data.progress)}%`;
+    } // main.js (tìm đoạn xử lý status === 'loading')
+
+} else if (status === 'loading') {
+    if (data.status === 'progress') {
+        // [FIX] Kiểm tra xem có tính được % hay không
+        const percent = data.progress ? Math.round(data.progress) : null;
+        
+        if (percent !== null && !isNaN(percent)) {
+            statusDiv.innerText = `Loading Model: ${percent}%`;
+        } else {
+            // Nếu không biết tổng dung lượng, chỉ hiện đang tải
+            statusDiv.innerText = `Downloading Model... (Size unknown)`;
+        }
+    } else {
+        statusDiv.innerText = `Status: ${data.status}`;
     }
+}
 };
 
 // 3. Vòng lặp chính (Main Loop - 60FPS)
@@ -103,4 +117,5 @@ function getColorHash(str) {
     for (let i = 0; i < str.length; i++) hash = str.charCodeAt(i) + ((hash << 5) - hash);
     const c = (hash & 0x00FFFFFF).toString(16).toUpperCase();
     return '#' + '00000'.substring(0, 6 - c.length) + c;
+
 }
