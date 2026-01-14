@@ -1,13 +1,10 @@
 // worker.js
-import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.14.0';
+// Sử dụng phiên bản ổn định mới hơn để load model nhanh hơn
+import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2';
 
+// Bắt buộc tắt local models khi chạy trên browser/github pages để nó fetch từ HF Hub
 env.allowLocalModels = false;
 env.useBrowserCache = true;
-
-// --- [FIX BẮT BUỘC] ---
-// Tắt đa luồng để chạy được trên GitHub Pages (tránh lỗi SharedArrayBuffer)
-env.backends.onnx.wasm.numThreads = 1;
-// -----------------------------------------
 
 class ObjectDetectionPipeline {
     static task = 'object-detection';
@@ -23,7 +20,7 @@ class ObjectDetectionPipeline {
 }
 
 self.addEventListener('message', async (event) => {
-    // Nhận ImageBitmap trực tiếp từ main thread (hiệu năng cao hơn blob/url)
+    // Kỹ thuật Zero-Copy: Nhận ImageBitmap trực tiếp
     const { image, status } = event.data;
 
     if (status === 'predict') {
@@ -32,10 +29,10 @@ self.addEventListener('message', async (event) => {
                 self.postMessage({ status: 'loading', data });
             });
 
-            // Inference
-            const output = await detector(image, { threshold: 0.8, percentage: true });
+            // Inference: DETR nhận đầu vào, threshold 0.5 là mức an toàn
+            const output = await detector(image, { threshold: 0.5, percentage: true });
 
-            // ImageBitmap cần được đóng thủ công để giải phóng RAM sau khi dùng xong
+            // Quan trọng: Giải phóng bộ nhớ của ImageBitmap trong Worker
             if (image && typeof image.close === 'function') image.close();
 
             self.postMessage({ status: 'complete', output });
@@ -43,23 +40,4 @@ self.addEventListener('message', async (event) => {
             self.postMessage({ status: 'error', data: e.toString() });
         }
     }
-    } else if (status === 'loading') {
-    if (data.status === 'progress') {
-        // [FIX] Kiểm tra xem có tính được % hay không
-        const percent = data.progress ? Math.round(data.progress) : null;
-        
-        if (percent !== null && !isNaN(percent)) {
-            statusDiv.innerText = `Loading Model: ${percent}%`;
-        } else {
-            // Nếu không biết tổng dung lượng, chỉ hiện đang tải
-            statusDiv.innerText = `Downloading Model... (Size unknown)`;
-        }
-    } else {
-        statusDiv.innerText = `Status: ${data.status}`;
-    }
-}
-
 });
-
-
-
